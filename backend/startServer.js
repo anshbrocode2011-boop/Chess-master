@@ -37,17 +37,15 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else if (fs.existsSync(distIndex)) {
+  } else {
+    if (!fs.existsSync(distIndex)) {
+      console.log('dist/index.html not found — running Vite production build automatically...');
+      const { build } = await import('vite');
+      await build({ root: rootDir });
+    }
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(distIndex);
-    });
-  } else {
-    app.get('*', (_req, res) => {
-      res
-        .status(503)
-        .type('text/plain')
-        .send('Frontend build not found (dist/index.html missing). Run "npm run build" in your Render Build Command.');
     });
   }
 
