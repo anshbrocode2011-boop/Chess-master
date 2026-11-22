@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: chessmaster
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22.18.0
+      - key: ROOM_TTL_MS
+        value: "600000"
+      - key: MAX_ROOMS
+        value: "500"

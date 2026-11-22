@@ -1,0 +1,6 @@
+{
+  "name": "ChessMaster Multiplayer Server",
+  "description": "Lightweight, server-authoritative Node.js + Express + Socket.IO and WebSocket chess multiplayer backend built for Netlify frontends and Render Free Tier deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
