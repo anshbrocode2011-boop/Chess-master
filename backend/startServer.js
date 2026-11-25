@@ -29,6 +29,24 @@ async function startServer() {
     corsOriginsRaw: process.env.CORS_ORIGINS || '*',
   });
 
+  // Serve Stockfish WebAssembly & asm.js engine worker files from node_modules/stockfish.js
+  const stockfishDir = path.resolve(rootDir, 'node_modules', 'stockfish.js');
+  const ENGINE_FILES = {
+    'stockfish.wasm.js': 'application/javascript; charset=utf-8',
+    'stockfish.wasm': 'application/wasm',
+    'stockfish.js': 'application/javascript; charset=utf-8',
+  };
+  app.get('/engine/:file', (req, res, next) => {
+    const file = req.params.file;
+    const contentType = ENGINE_FILES[file];
+    if (!contentType) return next();
+    const fullPath = path.join(stockfishDir, file);
+    if (!fs.existsSync(fullPath)) return next();
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', isProduction ? 'public, max-age=604800, immutable' : 'no-cache');
+    return res.sendFile(fullPath);
+  });
+
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

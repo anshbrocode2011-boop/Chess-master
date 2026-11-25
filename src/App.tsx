@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   apply,
-  chooseAI,
   color,
   files,
   inCheck,
   insufficient,
   kingPos,
   legalMoves,
+  moveToUci,
   posKey,
   sanOf,
   startState,
@@ -21,6 +21,7 @@ import {
   type PieceType,
   type PromoType,
 } from './game/chessEngine';
+import { StockfishClient } from './game/stockfishClient';
 import { PieceDefs, PieceSvg } from './components/ChessPiece';
 
 type Screen = 'menu' | 'lobby' | 'game';
@@ -55,6 +56,9 @@ interface SlideAnim {
 }
 
 interface DragState {
+  pointerId: number;
+  pointerType: string;
+  offsetY: number;
   r: number;
   c: number;
   startX: number;
@@ -219,7 +223,6 @@ export default function App() {
   thinkingRef.current = thinking;
   pendingPromoRef.current = pendingPromo;
   netRef.current = net;
-  dragRef.current = drag;
   selectedRef.current = selected;
   legalRef.current = legal;
 
@@ -232,11 +235,13 @@ export default function App() {
   const aiTimerRef = useRef<number | null>(null);
   const animTimerRef = useRef<number | null>(null);
   const ghostTimerRef = useRef<number | null>(null);
-  const workerRef = useRef<Worker | null>(null);
+  const engineRef = useRef<StockfishClient | null>(null);
+  const ucisRef = useRef<string[]>([]);
   const aiIdRef = useRef<number>(0);
   const genRef = useRef<number>(0);
 
   const boardRef = useRef<HTMLDivElement | null>(null);
+  const dragFloatRef = useRef<HTMLDivElement | null>(null);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const promoFirstBtnRef = useRef<HTMLButtonElement | null>(null);
   const sqRefs = useRef<(HTMLDivElement | null)[][]>(
@@ -317,9 +322,8 @@ export default function App() {
       window.clearTimeout(ghostTimerRef.current);
       ghostTimerRef.current = null;
     }
-    if (thinkingRef.current && workerRef.current) {
-      workerRef.current.terminate();
-      workerRef.current = null;
+    if (thinkingRef.current) {
+      engineRef.current?.cancel();
     }
     thinkingRef.current = false;
     animatingRef.current = false;
@@ -340,6 +344,7 @@ export default function App() {
     stateRef.current = fresh;
     statesRef.current = [];
     sansRef.current = [];
+    ucisRef.current = [];
     capsRef.current = { w: [], b: [] };
     lastMoveRef.current = null;
     repsRef.current = freshReps;
@@ -377,6 +382,13 @@ export default function App() {
   const playRef = useRef<(m: Move, opt?: { animate?: boolean; remote?: boolean }) => boolean>(() => false);
   const afterMoveRef = useRef<() => void>(() => {});
 
+  const getEngine = useCallback((): StockfishClient => {
+    if (!engineRef.current) {
+      engineRef.current = new StockfishClient();
+    }
+    return engineRef.current;
+  }, []);
+
   const onAIResult = useCallback((id: number, m: Move | null) => {
     if (id !== aiIdRef.current || !thinkingRef.current) return;
     thinkingRef.current = false;
@@ -386,46 +398,18 @@ export default function App() {
     }
   }, []);
 
-  const makeWorker = useCallback((): Worker | null => {
-    try {
-      const w = new Worker(new URL('./game/ai.worker.ts', import.meta.url), { type: 'module' });
-      w.onmessage = (e: MessageEvent<{ id: number; m: Move | null }>) => {
-        onAIResult(e.data.id, e.data.m);
-      };
-      w.onerror = () => {
-        if (workerRef.current === w) {
-          workerRef.current = null;
-          if (thinkingRef.current) {
-            const id = aiIdRef.current;
-            aiTimerRef.current = window.setTimeout(() => {
-              onAIResult(id, chooseAI(stateRef.current, difficultyRef.current));
-            }, 20);
-          }
-        }
-      };
-      return w;
-    } catch {
-      return null;
-    }
-  }, [onAIResult]);
-
   const requestAI = useCallback(() => {
     thinkingRef.current = true;
     setThinking(true);
     const id = ++aiIdRef.current;
-    if (!workerRef.current) {
-      workerRef.current = makeWorker();
-    }
-    if (workerRef.current) {
-      workerRef.current.postMessage({ id, s: stateRef.current, diff: difficultyRef.current });
-    } else {
-      aiTimerRef.current = window.setTimeout(() => {
-        if (id === aiIdRef.current) {
-          onAIResult(id, chooseAI(stateRef.current, difficultyRef.current));
-        }
-      }, 40);
-    }
-  }, [makeWorker, onAIResult]);
+    const engine = getEngine();
+    const uciHistory = ucisRef.current.slice();
+    engine
+      .requestMove(stateRef.current, uciHistory, difficultyRef.current, uciHistory.length <= 1)
+      .then((move) => {
+        onAIResult(id, move);
+      });
+  }, [getEngine, onAIResult]);
 
   const checkEnd = useCallback((): boolean => {
     const cur = stateRef.current;
@@ -529,6 +513,7 @@ export default function App() {
 
       const san = sanOf(cur, real, legalNow);
       const nextSans = [...sansRef.current, san];
+      const nextUcis = [...ucisRef.current, moveToUci(real)];
       const nextCaps = { w: capsRef.current.w.slice(), b: capsRef.current.b.slice() };
       if (capP) {
         nextCaps[color(p)!].push(type(capP)!);
@@ -541,6 +526,7 @@ export default function App() {
       stateRef.current = nextS;
       statesRef.current = nextStates;
       sansRef.current = nextSans;
+      ucisRef.current = nextUcis;
       capsRef.current = nextCaps;
       lastMoveRef.current = real;
       repsRef.current = nextReps;
@@ -603,7 +589,7 @@ export default function App() {
           setAnimating(false);
           setSlideAnim(null);
           afterMoveRef.current();
-        }, 300);
+        }, 235);
       } else {
         afterMoveRef.current();
       }
@@ -617,26 +603,32 @@ export default function App() {
   // Apply GPU-accelerated slide transition right after DOM commits for animated moves
   useLayoutEffect(() => {
     if (!slideAnim) return;
-    const sq0 = sqRefs.current[0]?.[0];
-    if (!sq0) return;
-    const sz = sq0.getBoundingClientRect().width;
+    const boardEl = boardRef.current;
+    const sz = boardEl ? boardEl.getBoundingClientRect().width / 8 : 0;
+    if (sz <= 0) return;
     const sgn = flippedRef.current ? -1 : 1;
 
     const animatedEls: SVGSVGElement[] = [];
     for (const mv of slideAnim.moves) {
       const cell = sqRefs.current[mv.r]?.[mv.c];
-      const pe = cell?.querySelector<SVGSVGElement>('.pc');
+      const pe = cell?.querySelector<SVGSVGElement>('.piece-main');
       if (!pe) continue;
       pe.style.transition = 'none';
-      pe.style.transform = `translate(${(mv.fc - mv.c) * sz * sgn}px, ${(mv.fr - mv.r) * sz * sgn}px)`;
+      pe.style.transform = `translate3d(${(mv.fc - mv.c) * sz * sgn}px, ${(mv.fr - mv.r) * sz * sgn}px, 0)`;
       pe.classList.add('moving');
       pe.getBoundingClientRect();
-      pe.style.transition = '';
-      pe.style.transform = 'translate(0, 0)';
       animatedEls.push(pe);
     }
 
+    const rafId = window.requestAnimationFrame(() => {
+      for (const pe of animatedEls) {
+        pe.style.transition = '';
+        pe.style.transform = 'translate3d(0, 0, 0)';
+      }
+    });
+
     return () => {
+      window.cancelAnimationFrame(rafId);
       for (const pe of animatedEls) {
         pe.classList.remove('moving');
         pe.style.transform = '';
@@ -654,6 +646,7 @@ export default function App() {
 
   const initialGame = useCallback(() => {
     cancelPending();
+    engineRef.current?.newGame();
     resetBoardState();
     afterMoveRef.current();
   }, [cancelPending, resetBoardState]);
@@ -666,6 +659,12 @@ export default function App() {
       const shouldFlip = m === 'ai' && h === 'b';
       flippedRef.current = shouldFlip;
 
+      if (m === 'ai') {
+        const eng = getEngine();
+        eng.warmUp();
+        eng.newGame();
+      }
+
       setMode(m);
       setHuman(h);
       setFlipped(shouldFlip);
@@ -675,7 +674,7 @@ export default function App() {
       // Trigger AI first move if playing as Black vs Computer
       window.setTimeout(() => afterMoveRef.current(), 0);
     },
-    [cancelPending, resetBoardState, sideChoice]
+    [cancelPending, getEngine, resetBoardState, sideChoice]
   );
 
   // ---- Online WebSocket lifecycle ----
@@ -1059,9 +1058,9 @@ export default function App() {
     return () => {
       cancelPending();
       closeWsOnly();
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
+      if (engineRef.current) {
+        engineRef.current.destroy();
+        engineRef.current = null;
       }
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     };
@@ -1093,7 +1092,8 @@ export default function App() {
   );
 
   const handleSquarePointerDown = (e: React.PointerEvent<HTMLDivElement>, r: number, c: number) => {
-    if (e.button > 0 || !canInteract()) return;
+    if ((e.pointerType === 'mouse' && e.button > 0) || dragRef.current || !canInteract()) return;
+    e.preventDefault();
     const p = stateRef.current.b[r][c];
 
     if (selectedRef.current) {
@@ -1112,21 +1112,24 @@ export default function App() {
       setSelected({ r, c });
       setLegal(nextLegal);
 
-      const sz = sqRefs.current[r]?.[c]?.getBoundingClientRect().width || 64;
+      const sz = boardRef.current ? boardRef.current.getBoundingClientRect().width / 8 : 44;
+      const offsetY = e.pointerType === 'touch' ? Math.round(sz * 0.35) : 0;
       const nextDrag: DragState = {
+        pointerId: e.pointerId,
+        pointerType: e.pointerType,
+        offsetY,
         r,
         c,
         startX: e.clientX,
         startY: e.clientY,
         x: e.clientX,
-        y: e.clientY,
+        y: e.clientY - offsetY,
         moved: false,
         wasSelected,
         piece: p,
         size: sz,
       };
       dragRef.current = nextDrag;
-      setDrag(nextDrag);
     } else {
       selectedRef.current = null;
       legalRef.current = [];
@@ -1138,27 +1141,50 @@ export default function App() {
   useEffect(() => {
     const onPointerMove = (e: PointerEvent) => {
       const d = dragRef.current;
-      if (!d) return;
+      if (!d || e.pointerId !== d.pointerId) return;
+      const threshold = d.pointerType === 'touch' ? 10 : 6;
       if (!d.moved) {
-        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 7) return;
+        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < threshold) return;
+        const started: DragState = {
+          ...d,
+          moved: true,
+          x: e.clientX,
+          y: e.clientY - d.offsetY,
+        };
+        dragRef.current = started;
+        setDrag(started);
+        return;
       }
-      const next: DragState = { ...d, moved: true, x: e.clientX, y: e.clientY };
-      dragRef.current = next;
-      setDrag(next);
+      d.x = e.clientX;
+      d.y = e.clientY - d.offsetY;
+      if (dragFloatRef.current) {
+        dragFloatRef.current.style.left = `${d.x}px`;
+        dragFloatRef.current.style.top = `${d.y}px`;
+      }
     };
 
     const endDrag = (e: PointerEvent, cancelled: boolean) => {
       const d = dragRef.current;
-      if (!d) return;
+      if (!d || e.pointerId !== d.pointerId) return;
       dragRef.current = null;
-      setDrag(null);
       if (d.moved) {
-        if (!cancelled) {
-          const target = document.elementFromPoint(e.clientX, e.clientY);
-          const sq = target?.closest?.('#board .sq') as HTMLElement | null;
-          if (sq && sq.dataset.r !== undefined && sq.dataset.c !== undefined) {
-            const tr = Number(sq.dataset.r);
-            const tc = Number(sq.dataset.c);
+        setDrag(null);
+        if (!cancelled && boardRef.current) {
+          const rect = boardRef.current.getBoundingClientRect();
+          const dropX = e.clientX;
+          const dropY = e.clientY - d.offsetY;
+          if (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            dropX >= rect.left &&
+            dropX < rect.right &&
+            dropY >= rect.top &&
+            dropY < rect.bottom
+          ) {
+            const colIdx = Math.min(7, Math.max(0, Math.floor(((dropX - rect.left) / rect.width) * 8)));
+            const rowIdx = Math.min(7, Math.max(0, Math.floor(((dropY - rect.top) / rect.height) * 8)));
+            const tr = flippedRef.current ? 7 - rowIdx : rowIdx;
+            const tc = flippedRef.current ? 7 - colIdx : colIdx;
             const cand = legalRef.current.filter((x) => x.r === tr && x.c === tc);
             if (cand.length) {
               tryMove(cand, true);
@@ -1176,14 +1202,22 @@ export default function App() {
 
     const onUp = (e: PointerEvent) => endDrag(e, false);
     const onCancel = (e: PointerEvent) => endDrag(e, true);
+    const onBlur = () => {
+      if (dragRef.current) {
+        dragRef.current = null;
+        setDrag(null);
+      }
+    };
 
-    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('blur', onBlur);
     };
   }, [tryMove]);
 
@@ -1266,10 +1300,12 @@ export default function App() {
     const st = statesRef.current[idx];
     const nextStates = statesRef.current.slice(0, idx);
     const nextSans = sansRef.current.slice(0, idx);
+    const nextUcis = ucisRef.current.slice(0, idx);
 
     stateRef.current = st.S;
     statesRef.current = nextStates;
     sansRef.current = nextSans;
+    ucisRef.current = nextUcis;
     lastMoveRef.current = st.lastMove;
     repsRef.current = st.reps;
     capsRef.current = st.caps;
@@ -1383,7 +1419,7 @@ export default function App() {
     return (
       <div className={`player${active ? ' active' : ''}`}>
         <span className="pdot" />
-        <span>{playerLabel(col)}</span>
+        <span className="pname">{playerLabel(col)}</span>
         <span className="caps">
           {sortedCaps.map((pt, idx) => (
             <PieceSvg key={`${col}-${pt}-${idx}`} code={`${opp}${pt}` as PieceCode} />
@@ -1526,6 +1562,7 @@ export default function App() {
                   <option value="easy">Easy</option>
                   <option value="medium">Medium</option>
                   <option value="hard">Hard</option>
+                  <option value="master">Master (Stockfish)</option>
                 </select>
               </label>
               <label>
@@ -1548,7 +1585,7 @@ export default function App() {
       {screen === 'lobby' && (
         <main className="menu">
           <section className="menu-card">
-            <div className="logo" style={{ fontSize: 'clamp(30px, 8vw, 42px)' }}>
+            <div className="logo logo-sm">
               Online<span>Play</span>
             </div>
             <p className="tag">Create a room and share the code, or join a friend&apos;s room.</p>
@@ -1705,61 +1742,64 @@ export default function App() {
               {renderPlayerBar(topCol)}
 
               <div className="board-wrap">
-                <div
-                  id="board"
-                  ref={boardRef}
-                  className="board"
-                  role="application"
-                  aria-label="Chess board"
-                >
-                  {Array.from({ length: 64 }).map((_, idx) => {
-                    const i = Math.floor(idx / 8);
-                    const j = idx % 8;
-                    const r = flipped ? 7 - i : i;
-                    const c = flipped ? 7 - j : j;
-                    const p = S.b[r][c];
-                    const isLast =
-                      lastMove &&
-                      ((lastMove.fr === r && lastMove.fc === c) ||
-                        (lastMove.r === r && lastMove.c === c));
-                    const isSel = selected && selected.r === r && selected.c === c;
-                    const isChk = chkPos && chkPos[0] === r && chkPos[1] === c;
-                    const lm = legal.find((x) => x.r === r && x.c === c);
-                    const isDragSource = drag?.moved && drag.r === r && drag.c === c;
+                <div className="board-ratio">
+                  <div
+                    id="board"
+                    ref={boardRef}
+                    className="board"
+                    role="application"
+                    aria-label="Chess board"
+                  >
+                    {Array.from({ length: 64 }).map((_, idx) => {
+                      const i = Math.floor(idx / 8);
+                      const j = idx % 8;
+                      const r = flipped ? 7 - i : i;
+                      const c = flipped ? 7 - j : j;
+                      const p = S.b[r][c];
+                      const isLast =
+                        lastMove &&
+                        ((lastMove.fr === r && lastMove.fc === c) ||
+                          (lastMove.r === r && lastMove.c === c));
+                      const isSel = selected && selected.r === r && selected.c === c;
+                      const isChk = chkPos && chkPos[0] === r && chkPos[1] === c;
+                      const lm = legal.find((x) => x.r === r && x.c === c);
+                      const isDragSource = drag?.moved && drag.r === r && drag.c === c;
 
-                    let cls = `sq ${(r + c) % 2 ? 'dark' : 'light'}`;
-                    if (isLast) cls += ' last';
-                    if (isSel) cls += ' selected';
-                    if (isChk) cls += ' check';
-                    if (lm) cls += p || lm.enpassant ? ' legal capture' : ' legal';
+                      let cls = `sq ${(r + c) % 2 ? 'dark' : 'light'}`;
+                      if (isLast) cls += ' last';
+                      if (isSel) cls += ' selected';
+                      if (isChk) cls += ' check';
+                      if (lm) cls += p || lm.enpassant ? ' legal capture' : ' legal';
 
-                    return (
-                      <div
-                        key={`${r}-${c}`}
-                        ref={(el) => {
-                          sqRefs.current[r][c] = el;
-                        }}
-                        className={cls}
-                        data-r={r}
-                        data-c={c}
-                        onPointerDown={(e) => handleSquarePointerDown(e, r, c)}
-                      >
-                        {j === 0 && <span className="notation rank">{8 - r}</span>}
-                        {i === 7 && <span className="notation file">{files[c]}</span>}
-                        {ghost && ghost.r === r && ghost.c === c && (
-                          <span key={ghost.key} className="ghost-piece">
-                            <PieceSvg code={ghost.piece} />
-                          </span>
-                        )}
-                        {p && (
-                          <PieceSvg
-                            code={p}
-                            style={isDragSource ? { opacity: 0.25 } : undefined}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
+                      return (
+                        <div
+                          key={`${r}-${c}`}
+                          ref={(el) => {
+                            sqRefs.current[r][c] = el;
+                          }}
+                          className={cls}
+                          data-r={r}
+                          data-c={c}
+                          onPointerDown={(e) => handleSquarePointerDown(e, r, c)}
+                        >
+                          {j === 0 && <span className="notation rank">{8 - r}</span>}
+                          {i === 7 && <span className="notation file">{files[c]}</span>}
+                          {ghost && ghost.r === r && ghost.c === c && (
+                            <span key={ghost.key} className="ghost-piece">
+                              <PieceSvg code={ghost.piece} />
+                            </span>
+                          )}
+                          {p && (
+                            <PieceSvg
+                              code={p}
+                              className="piece-main"
+                              style={isDragSource ? { opacity: 0.25 } : undefined}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -1795,6 +1835,7 @@ export default function App() {
       {/* FLOATING DRAG PIECE */}
       {drag?.moved && (
         <div
+          ref={dragFloatRef}
           className="drag-float"
           style={{
             width: drag.size,

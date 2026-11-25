@@ -1,7 +1,7 @@
 export type Color = 'w' | 'b';
 export type PieceType = 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
 export type PromoType = 'q' | 'r' | 'b' | 'n';
-export type Difficulty = 'easy' | 'medium' | 'hard';
+export type Difficulty = 'easy' | 'medium' | 'hard' | 'master';
 export type PieceCode = `${Color}${PieceType}`;
 export type Board = (PieceCode | null)[][];
 
@@ -381,7 +381,65 @@ export function sanOf(s: ChessState, m: Move, legal: Move[]): string {
   return txt;
 }
 
-// ---- AI ----
+export function moveToUci(m: Move): string {
+  return `${files[m.fc]}${8 - m.fr}${files[m.c]}${8 - m.r}${m.promo || ''}`;
+}
+
+export function uciToMove(s: ChessState, uci: string): Move | null {
+  const clean = (uci || '').trim().toLowerCase();
+  if (clean.length < 4 || clean === '(none)' || clean === '0000') return null;
+  const fc = files.indexOf(clean[0]);
+  const fr = 8 - parseInt(clean[1], 10);
+  const c = files.indexOf(clean[2]);
+  const r = 8 - parseInt(clean[3], 10);
+  const promoChar = clean[4] as PromoType | undefined;
+  const promo: PromoType | undefined =
+    promoChar && 'qrbn'.includes(promoChar) ? promoChar : undefined;
+  if (fc < 0 || c < 0 || Number.isNaN(fr) || Number.isNaN(r)) return null;
+  const all = legalMoves(s);
+  return (
+    all.find(
+      (m) =>
+        m.fr === fr &&
+        m.fc === fc &&
+        m.r === r &&
+        m.c === c &&
+        (m.promo || '') === (promo || '')
+    ) || null
+  );
+}
+
+export function stateToFen(s: ChessState, fullMove = 1): string {
+  const rows: string[] = [];
+  for (let r = 0; r < 8; r++) {
+    let empty = 0;
+    let row = '';
+    for (let c = 0; c < 8; c++) {
+      const p = s.b[r][c];
+      if (!p) {
+        empty++;
+      } else {
+        if (empty) {
+          row += String(empty);
+          empty = 0;
+        }
+        const ch = p[1];
+        row += p[0] === 'w' ? ch.toUpperCase() : ch;
+      }
+    }
+    if (empty) row += String(empty);
+    rows.push(row);
+  }
+  const castling =
+    (s.castle.wK ? 'K' : '') +
+      (s.castle.wQ ? 'Q' : '') +
+      (s.castle.bK ? 'k' : '') +
+      (s.castle.bQ ? 'q' : '') || '-';
+  const ep = s.ep ? `${files[s.ep.c]}${8 - s.ep.r}` : '-';
+  return `${rows.join('/')} ${s.turn} ${castling} ${ep} ${s.half} ${Math.max(1, fullMove)}`;
+}
+
+// ---- AI (fallback JS engine when Stockfish is unavailable) ----
 const MATE = 100000;
 const PST: Record<string, number[]> = {
   p: [0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 10, 10, 20, 30, 30, 20, 10, 10, 5, 5, 10, 25, 25, 10, 5, 5, 0, 0, 0, 20, 20, 0, 0, 0, 5, -5, -10, 0, 0, -10, -5, 5, 5, 10, 10, -20, -20, 10, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -538,7 +596,12 @@ export function chooseAI(s: ChessState, diff: Difficulty): Move | null {
     }
     return best;
   }
-  const cfg = diff === 'hard' ? { depth: 6, time: 2000, noise: 0 } : { depth: 3, time: 700, noise: 14 };
+  const cfg =
+    diff === 'master'
+      ? { depth: 7, time: 2400, noise: 0 }
+      : diff === 'hard'
+        ? { depth: 6, time: 1800, noise: 0 }
+        : { depth: 3, time: 700, noise: 14 };
   nodes = 0;
   stopped = false;
   deadline = Date.now() + cfg.time;
